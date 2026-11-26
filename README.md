@@ -46,7 +46,7 @@ Removing something from config.itd and applying **uninstalls it**, but only thin
 ## Packages, declared
 
 Yes yes, I know we're arch-based, but we killed pacman. Apologies.
-## icontd-guard 🤡
+## icontd-guard 
 
 Every change to config.itd is backed up to `/var/lib/icontd/config.itd.bak`. Delete config.itd and what happens is for YOU to find out!
 
