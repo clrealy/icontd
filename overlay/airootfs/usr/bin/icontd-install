@@ -20,7 +20,52 @@ export ICONTD_CONFIG=$CONFIG
 
 die() { "${D[@]}" --msgbox "❌ $1\n\nlog: $LOG" 10 60; clear; exit 1; }
 
+# ---------- 0. internet ----------
+has_net() { ping -c1 -W2 archlinux.org >/dev/null 2>&1; }
+
+wifi_connect() {
+  local dev ssid pw list
+  dev=$(basename -a /sys/class/net/wl* 2>/dev/null | head -1)
+  if [[ -z $dev ]] || ! command -v iwctl >/dev/null; then
+    "${D[@]}" --msgbox "no wi-fi card found 😭\n\nplug in ethernet and hit retry" 9 50
+    return 1
+  fi
+  iwctl station "$dev" scan >/dev/null 2>&1; sleep 3
+  list=$(iwctl station "$dev" get-networks 2>/dev/null | sed 's/\x1b\[[0-9;]*[A-Za-z]//g')
+  printf '%s\n' "$list" > /tmp/icontd-wifi.txt
+  "${D[@]}" --textbox /tmp/icontd-wifi.txt 20 70
+  ssid=$("${D[@]}" --stdout --inputbox "wi-fi name (SSID), exactly as shown" 8 60) || return 1
+  [[ -n $ssid ]] || return 1
+  pw=$("${D[@]}" --stdout --insecure --passwordbox "password for $ssid (blank if open)" 8 60) || return 1
+  if [[ -n $pw ]]; then
+    iwctl --passphrase "$pw" station "$dev" connect "$ssid" >/tmp/icontd-wifi.log 2>&1
+  else
+    iwctl station "$dev" connect "$ssid" >/tmp/icontd-wifi.log 2>&1
+  fi
+  for _ in 1 2 3 4 5 6 7 8 9 10; do has_net && return 0; sleep 1; done
+  "${D[@]}" --msgbox "couldn't connect to $ssid 💀\n\nlog: /tmp/icontd-wifi.log" 9 60
+  return 1
+}
+
+ensure_net() {
+  has_net && return 0
+  while true; do
+    local c
+    c=$("${D[@]}" --stdout --menu "no internet 🌐 the installer needs it\n(pacstrap, AUR, GURT, flatpak all download stuff)" 15 64 4 \
+      1 "retry (ethernet usually just connects)" \
+      2 "connect to wi-fi" \
+      3 "skip (install will probably fail)") || { clear; exit 0; }
+    case $c in
+      1) has_net && return 0 ;;
+      2) wifi_connect && { "${D[@]}" --msgbox "connected 🔴 u're online" 6 40; return 0; } ;;
+      3) return 0 ;;
+    esac
+  done
+}
+
 # ---------- 1. welcome ----------
+ensure_net
+
 "${D[@]}" --msgbox "welcome to icontd 🔴\n\nyour whole system is declared in:\n  $CONFIG\n\nthis installer reads it and builds that system.\nno package manager to babysit." 13 60
 
 if "${D[@]}" --yesno "wanna edit config.itd before installing?" 7 50; then
