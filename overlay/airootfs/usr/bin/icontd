@@ -7,7 +7,7 @@ set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib/icontd/common.sh
 . /usr/lib/icontd/common.sh
 
-VERSION=0.1.0
+VERSION=0.2.0
 STATE=/var/lib/icontd/managed
 LIBBIN=/usr/lib/icontd/bin
 PACMAN=$LIBBIN/pacman;          [[ -x $PACMAN ]] || PACMAN=$(command -v pacman || true)
@@ -213,7 +213,33 @@ cmd_apply() {
   else say "done 🔴"; fi
 }
 
+REPO_TARBALL="https://github.com/clrealy/icontd/archive/refs/heads/main.tar.gz"
+
+# pull the latest icontd scripts from the repo, then re-run w the new copy
+self_update() {
+  [[ -n ${ICONTD_SELF_UPDATED:-} ]] && return 0
+  say "updating icontd itself"
+  local t src
+  t=$(mktemp -d) || return 0
+  if curl -fsSL "$REPO_TARBALL" | tar -xz -C "$t" --strip-components=1 2>/dev/null; then
+    src="$t/overlay/airootfs"
+    if [[ -f $src/usr/bin/icontd && -f $src/usr/lib/icontd/common.sh ]]; then
+      install -m755 "$src/usr/bin/icontd" /usr/bin/icontd
+      install -m644 "$src/usr/lib/icontd/common.sh" /usr/lib/icontd/common.sh
+      mkdir -p /usr/share/icontd /usr/lib/icontd
+      [[ -d $src/usr/share/icontd ]] && cp -a "$src/usr/share/icontd/." /usr/share/icontd/
+      [[ -f $src/usr/share/icontd/guard/icontd-guard ]] && install -m755 "$src/usr/share/icontd/guard/icontd-guard" /usr/bin/icontd-guard
+      [[ -f $src/usr/share/icontd/pkgtools/hide-pkgtools ]] && install -m755 "$src/usr/share/icontd/pkgtools/hide-pkgtools" /usr/lib/icontd/hide-pkgtools
+      rm -rf "$t"
+      ICONTD_SELF_UPDATED=1 exec /usr/bin/icontd "${ICONTD_ARGS[@]}"
+    fi
+  fi
+  rm -rf "$t"
+  warn "couldn't fetch the latest icontd, continuing w the installed one"
+}
+
 cmd_upgrade() {
+  self_update
   say "upgrading everything"
   "$PACMAN" -Syu --noconfirm || die "pacman upgrade failed"
   [[ -n $FLATPAK ]] && { "$FLATPAK" update -y --noninteractive || warn "flatpak update failed"; }
@@ -227,7 +253,7 @@ ${R}●${N} icontd $VERSION — ur whole system lives in $ICONTD_CONFIG
 
   sudo icontd apply     make the system match config.itd
   sudo icontd diff      show what apply would change (changes nothing)
-  sudo icontd upgrade   update everything, then apply
+  sudo icontd upgrade   update icontd + everything, then apply (alias: update)
   icontd edit           open config.itd in \$EDITOR (w sudo)
   icontd version
 
@@ -236,10 +262,11 @@ removing something from config.itd + apply = it gets uninstalled
 USAGE
 }
 
+ICONTD_ARGS=("$@")
 case "${1:-}" in
   apply)   need_root apply; [[ ${2:-} == -n || ${2:-} == --dry-run ]] && DRY=1; cmd_apply ;;
   diff|plan) need_root diff; DRY=1; cmd_apply ;;
-  upgrade|up) need_root upgrade; cmd_upgrade ;;
+  upgrade|up|update) need_root upgrade; cmd_upgrade ;;
   edit)    exec sudo "${EDITOR:-nano}" "$ICONTD_CONFIG" ;;
   version|-v|--version) echo "icontd $VERSION" ;;
   ""|help|-h|--help) usage ;;
