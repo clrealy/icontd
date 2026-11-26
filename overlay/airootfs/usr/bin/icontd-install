@@ -268,19 +268,23 @@ CHROOT
     echo ">> AUR: ${AURPKGS[*]}"
     # temp passwordless sudo so makepkg can install deps, removed right after
     echo "$USERNAME ALL=(ALL) NOPASSWD: ALL" > "$MNT/etc/sudoers.d/99-icontd-tmp"
+    # build paru from source (not paru-bin), retry the clone since AUR TLS can flake
     arch-chroot "$MNT" sudo -u "$USERNAME" bash -c '
       set -e
-      cd /tmp && rm -rf paru-bin
-      git clone --depth 1 https://aur.archlinux.org/paru-bin.git
-      cd paru-bin && makepkg -si --noconfirm
+      cd /tmp && rm -rf paru
+      for try in 1 2 3; do
+        git clone --depth 1 https://aur.archlinux.org/paru.git && break
+        echo "!! AUR clone failed (try $try), retrying in 5s"; rm -rf paru; sleep 5
+      done
+      cd paru && makepkg -si --noconfirm --needed
     ' || echo "!! couldn't build paru (AUR helper)"
     for p in "${AURPKGS[@]}"; do
       arch-chroot "$MNT" sudo -u "$USERNAME" paru -S --noconfirm --needed --skipreview "$p" \
         || echo "!! AUR package $p failed"
     done
-    # icontd has no package manager — the helper was just for setup
-    arch-chroot "$MNT" pacman -Rns --noconfirm paru-bin paru-bin-debug 2>/dev/null \
-      || arch-chroot "$MNT" pacman -Rns --noconfirm paru-bin || true
+    # icontd has no package manager, so remove the helper after setup
+    arch-chroot "$MNT" pacman -Rns --noconfirm paru paru-debug 2>/dev/null \
+      || arch-chroot "$MNT" pacman -Rns --noconfirm paru || true
     rm -f "$MNT/etc/sudoers.d/99-icontd-tmp"
   fi
 
