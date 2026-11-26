@@ -7,7 +7,7 @@ ICONTD_CONFIG=${ICONTD_CONFIG:-/etc/icontd/config.itd}
 GURT_INSTALLER="https://gurtproject.org/install.sh"
 GURT_INSTALL=(install)
 GURT_REMOVE=(remove)
-GURT_UPDATE=(update)
+GURT_UPDATE=(upgrade)
 GURT_GUI_PKG="gurt-app"
 
 # itd_get KEY  -> value (last one wins), trimmed

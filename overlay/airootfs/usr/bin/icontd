@@ -217,7 +217,7 @@ cmd_upgrade() {
   say "upgrading everything"
   "$PACMAN" -Syu --noconfirm || die "pacman upgrade failed"
   [[ -n $FLATPAK ]] && { "$FLATPAK" update -y --noninteractive || warn "flatpak update failed"; }
-  [[ -n $GURT ]] && { "$GURT" "${GURT_UPDATE[@]}" </dev/null || warn "gurt update failed"; }
+  [[ -n $GURT ]] && { "$GURT" "${GURT_UPDATE[@]}" </dev/null || warn "gurt upgrade failed"; }
   cmd_apply
 }
 
