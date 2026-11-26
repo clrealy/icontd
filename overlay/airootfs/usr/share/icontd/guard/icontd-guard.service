@@ -1,0 +1,6 @@
+[Unit]
+Description=icontd guard (roast + restore config.itd)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/icontd-guard

@@ -1,0 +1,13 @@
+NAME="icontd"
+PRETTY_NAME="icontd"
+ID=icontd
+ID_LIKE=arch
+BUILD_ID=rolling
+VARIANT="declarative"
+VARIANT_ID=declarative
+ANSI_COLOR="38;2;213;0;0"
+LOGO=icontd
+HOME_URL="https://github.com/clrealy/icontd"
+DOCUMENTATION_URL="https://github.com/clrealy/icontd#readme"
+SUPPORT_URL="https://github.com/clrealy/icontd/discussions"
+BUG_REPORT_URL="https://github.com/clrealy/icontd/issues"

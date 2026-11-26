@@ -1,0 +1,10 @@
+[Unit]
+Description=watch /etc/icontd for someone being stupid
+
+[Path]
+PathChanged=/etc/icontd
+PathChanged=/etc/icontd/config.itd
+MakeDirectory=yes
+
+[Install]
+WantedBy=multi-user.target

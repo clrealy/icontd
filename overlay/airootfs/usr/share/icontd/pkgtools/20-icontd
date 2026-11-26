@@ -1,0 +1,3 @@
+# the icontd user is the only one that can install stuff
+icontd ALL=(ALL:ALL) ALL
+Defaults:icontd secure_path="/usr/lib/icontd/bin:/usr/local/sbin:/usr/local/bin:/usr/bin"

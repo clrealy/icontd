@@ -1,0 +1,27 @@
+# icontd system config (config.itd)
+# flat key=value, lists are comma separated — this file IS the package manager
+
+hostname=icontd
+timezone=America/New_York
+locale=en_US.UTF-8
+keymap=us
+
+kernel=linux
+shell=zsh
+
+de=plasma
+wm=
+
+packages=git, neovim, firefox, fastfetch, openssh
+# AUR packages (built during install, no AUR helper left behind)
+aurpackages=
+flatpaks=
+
+# GURT (gurtproject.org) as a first-class package source
+gurt=
+# yes/no — install the GURT GUI
+gurt_gui=no
+
+# git repo url. if it has an install.sh that runs, otherwise files get copied into ~
+dotfiles=
+services=NetworkManager, sshd

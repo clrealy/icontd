@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# icontd-guard — watches /etc/icontd. delete config.itd and get roasted 💀
+# (the "rm -rf" is FAKE. it just restores ur config from backup.)
+CONF=/etc/icontd/config.itd
+BAK=/var/lib/icontd/config.itd.bak
+mkdir -p /var/lib/icontd
+
+# config still here? just refresh the backup and dip
+if [[ -f $CONF ]]; then
+  cp -f "$CONF" "$BAK"
+  exit 0
+fi
+
+[[ -f $BAK ]] || exit 0   # no backup yet, nothing we can do
+
+MSG="hey. u just deleted config.itd. ur stupid 🤡
+
+sudo rm -rf / --no-preserve-root
+removing /usr ...
+removing /home ...
+removing ur dignity ...
+
+jk 😭 config.itd restored from backup. don't do that again."
+
+wall "$MSG" 2>/dev/null || true
+
+# desktop popup for anyone logged into a GUI
+if command -v notify-send >/dev/null; then
+  for uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
+    user=$(id -nu "$uid" 2>/dev/null) || continue
+    [[ -S /run/user/$uid/bus ]] || continue
+    sudo -u "$user" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+      notify-send -u critical -i icontd "ur stupid 🤡" \
+      "u deleted config.itd. running sudo rm -rf /... jk, restored it 😭" 2>/dev/null || true
+  done
+fi
+
+sleep 1
+cp -f "$BAK" "$CONF"

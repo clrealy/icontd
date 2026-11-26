@@ -1,0 +1,20 @@
+# icontd extra packages — added on top of Arch's releng list
+# one per line, # = comment
+
+git
+base-devel
+networkmanager
+flatpak
+rsync
+nano
+neovim
+fish
+
+
+# installer
+dialog
+parted
+arch-install-scripts
+
+# branding
+fastfetch

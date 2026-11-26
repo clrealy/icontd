@@ -1,0 +1,29 @@
+#!/bin/sh
+# icontd-flatpak-wrapper
+# flatpak apps still RUN for everyone (app launchers need this),
+# but install/remove/update = "command not found" unless ur the icontd user.
+REAL=/usr/lib/icontd/flatpak-real
+
+if [ "$(id -un)" = icontd ] || [ "${SUDO_USER:-}" = icontd ]; then
+  exec "$REAL" "$@"
+fi
+# root w/o sudo (system services, hooks) is fine
+if [ "$(id -u)" = 0 ] && [ -z "${SUDO_USER:-}" ]; then
+  exec "$REAL" "$@"
+fi
+
+# find the subcommand (skip leading --options like --user / --system)
+sub=""
+for a in "$@"; do
+  case "$a" in
+    --version|--help|--print-updated-env|--print-system-only|--installations|--default-arch|--supported-arches|--gl-drivers) exec "$REAL" "$@" ;;
+    -*) continue ;;
+    *) sub="$a"; break ;;
+  esac
+done
+case "$sub" in
+  run|ps|kill|info|list|enter|history|document-*|permission-*|"") exec "$REAL" "$@" ;;
+esac
+
+echo "${SHELL##*/}: command not found: flatpak" >&2
+exit 127

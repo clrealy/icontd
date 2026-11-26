@@ -1,0 +1,9 @@
+// gurt-app runs `pkexec /usr/lib/icontd/bin/gurt ...`
+// this makes that popup ask for the icontd user's password (not yours)
+polkit.addAdminRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        action.lookup("program") == "/usr/lib/icontd/bin/gurt") {
+        return ["unix-user:icontd"];
+    }
+    return null;
+});

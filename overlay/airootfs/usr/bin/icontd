@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+# icontd — make this system match /etc/icontd/config.itd 🔴
+#   icontd apply      install/remove/enable stuff so the system matches config.itd
+#   icontd diff       show what apply would do, change nothing
+#   icontd upgrade    update everything (pacman, flatpak, gurt), then apply
+set -uo pipefail
+# shellcheck source-path=SCRIPTDIR source=../lib/icontd/common.sh
+. /usr/lib/icontd/common.sh
+
+VERSION=0.1.0
+STATE=/var/lib/icontd/managed
+LIBBIN=/usr/lib/icontd/bin
+PACMAN=$LIBBIN/pacman;          [[ -x $PACMAN ]] || PACMAN=$(command -v pacman || true)
+GURT=$LIBBIN/gurt;              [[ -x $GURT ]]   || GURT=$(command -v gurt || true)
+FLATPAK=/usr/lib/icontd/flatpak-real; [[ -x $FLATPAK ]] || FLATPAK=$(command -v flatpak || true)
+
+R=$'\e[38;2;213;0;0m'; B=$'\e[1m'; N=$'\e[0m'
+say()  { printf '%s●%s %s\n' "$R" "$N" "$*"; }
+add()  { printf '   %s+%s %s\n' "$B" "$N" "$*"; }
+del()  { printf '   %s-%s %s\n' "$R" "$N" "$*"; }
+warn() { printf '   %s!!%s %s\n' "$R" "$N" "$*" >&2; }
+die()  { printf '%s●%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+DRY=0
+CHANGED=0
+run() { CHANGED=1; [[ $DRY == 1 ]] && return 0; "$@"; }
+
+need_root() { [[ $EUID -eq 0 ]] || die "run it w sudo: sudo icontd $1"; }
+state_get() { [[ -f $STATE/$1.list ]] && sort -u "$STATE/$1.list" || true; }
+state_set() { [[ $DRY == 1 ]] && return 0; mkdir -p "$STATE"; sort -u > "$STATE/$1.list"; }
+only_in() { comm -23 <(printf '%s\n' "$1" | sed '/^$/d' | sort -u) <(printf '%s\n' "$2" | sed '/^$/d' | sort -u); }
+
+# temp passwordless sudo for the icontd user while building AUR stuff
+TMP_SUDO=/etc/sudoers.d/99-icontd-apply
+cleanup() { rm -f "$TMP_SUDO"; }
+trap cleanup EXIT
+
+# ---------- system settings ----------
+apply_system() {
+  say "system"
+  local v cur
+  v=$(itd_get hostname)
+  if [[ -n $v && $(cat /etc/hostname 2>/dev/null) != "$v" ]]; then
+    add "hostname → $v"
+    run sh -c "echo '$v' > /etc/hostname"
+    run sed -i "s/^127\.0\.1\.1 .*/127.0.1.1 $v/" /etc/hosts
+  fi
+  v=$(itd_get timezone)
+  if [[ -n $v ]]; then
+    [[ -f /usr/share/zoneinfo/$v ]] || { warn "timezone '$v' isn't real, skipping"; v=""; }
+    cur=$(readlink /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')
+    if [[ -n $v && $cur != "$v" ]]; then add "timezone → $v"; run ln -sf "/usr/share/zoneinfo/$v" /etc/localtime; fi
+  fi
+  v=$(itd_get locale)
+  if [[ -n $v ]] && ! grep -qx "LANG=$v" /etc/locale.conf 2>/dev/null; then
+    add "locale → $v"
+    run sed -i "s/^#\($v \)/\1/" /etc/locale.gen
+    grep -q "^$v " /etc/locale.gen 2>/dev/null || run sh -c "echo '$v UTF-8' >> /etc/locale.gen"
+    run locale-gen
+    run sh -c "echo 'LANG=$v' > /etc/locale.conf"
+  fi
+  v=$(itd_get keymap)
+  if [[ -n $v ]] && ! grep -qx "KEYMAP=$v" /etc/vconsole.conf 2>/dev/null; then
+    add "keymap → $v"; run sh -c "echo 'KEYMAP=$v' > /etc/vconsole.conf"
+  fi
+}
+
+# ---------- pacman ----------
+apply_pacman() {
+  say "packages"
+  [[ -n $PACMAN ]] || { warn "pacman not found"; return; }
+  local want have old miss gone kernel_touched=0 p
+  want=$(itd_desired_pkgs)
+  have=$("$PACMAN" -Qq | sort -u)
+  old=$(state_get packages)
+  miss=$(only_in "$want" "$have")
+  gone=$(comm -12 <(only_in "$old" "$want") <(printf '%s\n' "$have"))
+  for p in $miss; do add "$p"; done
+  for p in $gone; do del "$p"; done
+  [[ "$miss$gone" =~ (^|[[:space:]])linux ]] && kernel_touched=1
+  # shellcheck disable=SC2086
+  [[ -n $miss ]] && { run "$PACMAN" -S --needed --noconfirm $miss || warn "some packages failed to install"; }
+  # shellcheck disable=SC2086
+  [[ -n $gone ]] && { run "$PACMAN" -Rns --noconfirm $gone || run "$PACMAN" -R --noconfirm $gone || warn "couldn't remove: $gone (something else needs it?)"; }
+  [[ $kernel_touched == 1 && -d /boot/grub ]] && run grub-mkconfig -o /boot/grub/grub.cfg
+  [[ $DRY == 1 ]] || comm -12 <(printf '%s\n' "$want") <("$PACMAN" -Qq | sort -u) | state_set packages
+}
+
+# ---------- shell ----------
+apply_shell() {
+  local sh_ path u s
+  sh_=$(itd_get shell); sh_=${sh_:-zsh}
+  path=$(command -v "$sh_" || echo "/usr/bin/$sh_")
+  [[ $DRY == 1 || -x $path ]] || { warn "shell $sh_ isn't installed"; return; }
+  # real people only: uid 1000+, home in /home, a real login shell
+  while IFS=: read -r u _ uid _ _ home s; do
+    (( uid >= 1000 && uid < 60000 )) || continue
+    [[ $home == /home/* ]] || continue
+    [[ $s == */nologin || $s == */false ]] && continue
+    [[ $s == "$path" ]] && continue
+    add "shell for $u → $sh_"; run chsh -s "$path" "$u" >/dev/null
+  done < /etc/passwd
+}
+
+# ---------- AUR ----------
+apply_aur() {
+  local want have old miss gone p
+  want=$(itd_list aurpackages | sort -u)
+  old=$(state_get aur)
+  [[ -z "$want$old" ]] && return
+  say "AUR"
+  have=$("$PACMAN" -Qqm 2>/dev/null | sort -u)
+  miss=$(only_in "$want" "$have")
+  gone=$(comm -12 <(only_in "$old" "$want") <(printf '%s\n' "$have"))
+  for p in $miss; do add "$p"; done
+  for p in $gone; do del "$p"; done
+  if [[ -n $miss && $DRY == 0 ]]; then
+    id icontd >/dev/null 2>&1 || { warn "no icontd user, can't build AUR"; return; }
+    echo "icontd ALL=(ALL) NOPASSWD: ALL" > "$TMP_SUDO"; chmod 440 "$TMP_SUDO"
+    for p in $miss; do
+      CHANGED=1
+      sudo -u icontd env PACMAN="$PACMAN" bash -c '
+        set -e; d=$(mktemp -d); cd "$d"
+        git clone --depth 1 "https://aur.archlinux.org/$1.git"
+        cd "$1" && makepkg -si --noconfirm --needed
+        rm -rf "$d"' _ "$p" || warn "AUR $p failed (AUR-only deps aren't auto-built)"
+    done
+    rm -f "$TMP_SUDO"
+  fi
+  # shellcheck disable=SC2086
+  [[ -n $gone ]] && { run "$PACMAN" -Rns --noconfirm $gone || warn "couldn't remove: $gone"; }
+  [[ $DRY == 1 ]] || comm -12 <(printf '%s\n' "$want") <("$PACMAN" -Qqm | sort -u) | state_set aur
+}
+
+# ---------- flatpak ----------
+apply_flatpak() {
+  local want have old miss gone p
+  want=$(itd_list flatpaks | sort -u)
+  old=$(state_get flatpaks)
+  [[ -z "$want$old" ]] && return
+  say "flatpaks"
+  [[ -n $FLATPAK || $DRY == 1 ]] || { warn "flatpak not installed yet (apply packages first)"; return; }
+  have=$([[ -n $FLATPAK ]] && "$FLATPAK" list --app --columns=application 2>/dev/null | sort -u)
+  miss=$(only_in "$want" "$have")
+  gone=$(comm -12 <(only_in "$old" "$want") <(printf '%s\n' "$have"))
+  for p in $miss; do add "$p"; done
+  for p in $gone; do del "$p"; done
+  if [[ -n $miss ]]; then
+    run "$FLATPAK" remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    for p in $miss; do run "$FLATPAK" install -y --noninteractive flathub "$p" || warn "flatpak $p failed"; done
+  fi
+  for p in $gone; do run "$FLATPAK" uninstall -y --noninteractive "$p" || warn "couldn't remove $p"; done
+  [[ $DRY == 1 ]] || comm -12 <(printf '%s\n' "$want") <("$FLATPAK" list --app --columns=application | sort -u) | state_set flatpaks
+}
+
+# ---------- GURT ----------
+apply_gurt() {
+  local want old miss gone p ok=()
+  want=$(itd_desired_gurt)
+  old=$(state_get gurt)
+  [[ -z "$want$old" ]] && return
+  say "GURT"
+  miss=$(only_in "$want" "$old")
+  gone=$(only_in "$old" "$want")
+  for p in $miss; do add "$p"; done
+  for p in $gone; do del "$p"; done
+  if [[ -n $miss && -z $GURT && $DRY == 0 ]]; then
+    CHANGED=1
+    curl -fsSL "$GURT_INSTALLER" | sh || warn "GURT install failed"
+    /usr/lib/icontd/hide-pkgtools 2>/dev/null || true
+    GURT=$LIBBIN/gurt; [[ -x $GURT ]] || GURT=$(command -v gurt || true)
+  fi
+  mapfile -t ok < <(only_in "$old" "$gone")
+  for p in $miss; do
+    if run "$GURT" "${GURT_INSTALL[@]}" "$p" </dev/null; then ok+=("$p"); else warn "GURT $p failed"; fi
+  done
+  for p in $gone; do run "$GURT" "${GURT_REMOVE[@]}" "$p" </dev/null || warn "couldn't remove GURT $p"; done
+  printf '%s\n' "${ok[@]}" | state_set gurt
+}
+
+# ---------- services ----------
+apply_services() {
+  local want old gone s
+  want=$(itd_desired_services)
+  old=$(state_get services)
+  [[ -z "$want$old" ]] && return
+  say "services"
+  for s in $want; do
+    systemctl is-enabled --quiet "$s" 2>/dev/null && continue
+    add "enable $s"; run systemctl enable "$s" || warn "couldn't enable $s (is its package in packages=?)"
+  done
+  gone=$(only_in "$old" "$want")
+  for s in $gone; do
+    systemctl is-enabled --quiet "$s" 2>/dev/null || continue
+    del "disable $s"; run systemctl disable "$s" || warn "couldn't disable $s"
+  done
+  printf '%s\n' "$want" | state_set services
+}
+
+cmd_apply() {
+  [[ -f $ICONTD_CONFIG ]] || die "no $ICONTD_CONFIG (did u delete it? 🤡)"
+  if [[ $DRY == 1 ]]; then say "${B}dry run${N} — nothing changes"; else say "applying $ICONTD_CONFIG"; fi
+  apply_system
+  apply_pacman
+  apply_shell
+  apply_aur
+  apply_flatpak
+  apply_gurt
+  apply_services
+  [[ $DRY == 0 ]] && { /usr/lib/icontd/hide-pkgtools 2>/dev/null || true; /usr/bin/icontd-guard 2>/dev/null || true; }
+  if [[ $CHANGED == 0 ]]; then say "already matches config.itd ✨"
+  elif [[ $DRY == 1 ]]; then say "run ${B}sudo icontd apply${N} to do it"
+  else say "done 🔴"; fi
+}
+
+cmd_upgrade() {
+  say "upgrading everything"
+  "$PACMAN" -Syu --noconfirm || die "pacman upgrade failed"
+  [[ -n $FLATPAK ]] && { "$FLATPAK" update -y --noninteractive || warn "flatpak update failed"; }
+  [[ -n $GURT ]] && { "$GURT" "${GURT_UPDATE[@]}" </dev/null || warn "gurt update failed"; }
+  cmd_apply
+}
+
+usage() {
+  cat <<USAGE
+${R}●${N} icontd $VERSION — ur whole system lives in $ICONTD_CONFIG
+
+  sudo icontd apply     make the system match config.itd
+  sudo icontd diff      show what apply would change (changes nothing)
+  sudo icontd upgrade   update everything, then apply
+  icontd edit           open config.itd in \$EDITOR (w sudo)
+  icontd version
+
+removing something from config.itd + apply = it gets uninstalled
+(only stuff icontd installed itself, never the base system).
+USAGE
+}
+
+case "${1:-}" in
+  apply)   need_root apply; [[ ${2:-} == -n || ${2:-} == --dry-run ]] && DRY=1; cmd_apply ;;
+  diff|plan) need_root diff; DRY=1; cmd_apply ;;
+  upgrade|up) need_root upgrade; cmd_upgrade ;;
+  edit)    exec sudo "${EDITOR:-nano}" "$ICONTD_CONFIG" ;;
+  version|-v|--version) echo "icontd $VERSION" ;;
+  ""|help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac

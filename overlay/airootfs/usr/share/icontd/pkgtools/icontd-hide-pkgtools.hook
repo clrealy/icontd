@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/bin/pacman
+Target = usr/bin/flatpak
+
+[Action]
+Description = hiding pacman + flatpak installs (only the icontd user gets them)
+When = PostTransaction
+Exec = /usr/lib/icontd/hide-pkgtools

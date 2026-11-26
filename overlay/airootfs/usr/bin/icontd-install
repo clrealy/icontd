@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+# icontd-install — TUI installer for icontd
+# reads /etc/icontd/config.itd and installs the system it declares.
+set -uo pipefail
+
+CONFIG=/etc/icontd/config.itd
+TITLE="icontd installer"
+MNT=/mnt
+LOG=/tmp/icontd-install.log
+D=(dialog --backtitle "icontd" --title "$TITLE")
+
+# shared helpers: itd_get, itd_list, de_pkgs, de_dm, GURT_* settings
+export ICONTD_CONFIG=$CONFIG
+# shellcheck source-path=SCRIPTDIR source=../lib/icontd/common.sh
+. /usr/lib/icontd/common.sh
+
+[[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
+[[ -f $CONFIG ]] || { echo "missing $CONFIG"; exit 1; }
+
+
+die() { "${D[@]}" --msgbox "❌ $1\n\nlog: $LOG" 10 60; clear; exit 1; }
+
+# ---------- 1. welcome ----------
+"${D[@]}" --msgbox "welcome to icontd 🔴\n\nyour whole system is declared in:\n  $CONFIG\n\nthis installer reads it and builds that system.\nno package manager to babysit." 13 60
+
+if "${D[@]}" --yesno "wanna edit config.itd before installing?" 7 50; then
+  ${EDITOR:-nano} "$CONFIG"
+fi
+
+HOSTNAME_=$(itd_get hostname);  HOSTNAME_=${HOSTNAME_:-icontd}
+TIMEZONE=$(itd_get timezone);   TIMEZONE=${TIMEZONE:-UTC}
+LOCALE=$(itd_get locale);       LOCALE=${LOCALE:-en_US.UTF-8}
+KEYMAP=$(itd_get keymap);       KEYMAP=${KEYMAP:-us}
+KERNEL=$(itd_get kernel);       KERNEL=${KERNEL:-linux}
+USHELL=$(itd_get shell);        USHELL=${USHELL:-zsh}
+DE=$(itd_get de)
+
+[[ -f /usr/share/zoneinfo/$TIMEZONE ]] || die "timezone '$TIMEZONE' in config.itd isn't real"
+
+# ---------- 2. disk ----------
+# skip the USB we booted from
+LIVEDEV=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
+LIVEDISK=""; [[ -n $LIVEDEV ]] && LIVEDISK="/dev/$(lsblk -no PKNAME "$LIVEDEV" 2>/dev/null | head -1)"
+mapfile -t DISKS < <(lsblk -dnpo NAME,SIZE,MODEL -e 7,11 | awk -v live="$LIVEDISK" '$1 != live')
+[[ ${#DISKS[@]} -gt 0 ]] || die "no disks found"
+MENU=()
+for line in "${DISKS[@]}"; do
+  name=$(awk '{print $1}' <<<"$line"); rest=$(cut -d' ' -f2- <<<"$line")
+  MENU+=("$name" "$rest")
+done
+DISK=$("${D[@]}" --stdout --menu "pick the disk to install on" 15 60 8 "${MENU[@]}") || { clear; exit 0; }
+
+"${D[@]}" --defaultno --yesno "⚠️  this ERASES EVERYTHING on\n\n   $DISK\n\nfr fr no undo. continue?" 11 50 || { clear; exit 0; }
+
+# ---------- 3. user ----------
+USERNAME=$("${D[@]}" --stdout --inputbox "username" 8 50) || { clear; exit 0; }
+[[ $USERNAME =~ ^[a-z_][a-z0-9_-]*$ ]] || die "username must be lowercase letters/numbers/_/-"
+[[ $USERNAME != icontd ]] || die "'icontd' is taken — that's the package user"
+while true; do
+  P1=$("${D[@]}" --stdout --insecure --passwordbox "password for $USERNAME" 8 50) || { clear; exit 0; }
+  P2=$("${D[@]}" --stdout --insecure --passwordbox "again" 8 50) || { clear; exit 0; }
+  [[ -n $P1 && $P1 == "$P2" ]] && break
+  "${D[@]}" --msgbox "passwords don't match (or empty) 💀 try again" 7 50
+done
+
+if "${D[@]}" --yesno "use the same password for root?" 7 50; then
+  RP=$P1
+else
+  while true; do
+    RP=$("${D[@]}" --stdout --insecure --passwordbox "root password" 8 50) || { clear; exit 0; }
+    R2=$("${D[@]}" --stdout --insecure --passwordbox "again" 8 50) || { clear; exit 0; }
+    [[ -n $RP && $RP == "$R2" ]] && break
+    "${D[@]}" --msgbox "passwords don't match (or empty) 💀 try again" 7 50
+  done
+fi
+
+"${D[@]}" --msgbox "heads up: pacman, gurt + flatpak installs are hidden on icontd.\n\nnormal users get 'command not found'. only the special user 'icontd' (w sudo) can use them." 10 60
+if "${D[@]}" --yesno "use the same password for the icontd user?" 7 50; then
+  IP=$P1
+else
+  while true; do
+    IP=$("${D[@]}" --stdout --insecure --passwordbox "password for the icontd user" 8 50) || { clear; exit 0; }
+    I2=$("${D[@]}" --stdout --insecure --passwordbox "again" 8 50) || { clear; exit 0; }
+    [[ -n $IP && $IP == "$I2" ]] && break
+    "${D[@]}" --msgbox "passwords don't match (or empty) 💀 try again" 7 50
+  done
+fi
+
+# ---------- 4. summary ----------
+UEFI=0; [[ -d /sys/firmware/efi ]] && UEFI=1
+"${D[@]}" --yesno "about to install:\n
+  disk      $DISK
+  boot      $([[ $UEFI == 1 ]] && echo UEFI || echo BIOS)
+  hostname  $HOSTNAME_
+  user      $USERNAME (sudo)
+  root      password set
+  icontd    package user (only one w pacman/gurt)
+  timezone  $TIMEZONE
+  locale    $LOCALE
+  kernel    $KERNEL
+  shell     $USHELL
+  de        ${DE:-none}
+  packages  $(itd_list packages | wc -l) pacman, $(itd_list aurpackages | wc -l) AUR, $(itd_list gurt | wc -l) GURT, $(itd_list flatpaks | wc -l) flatpak
+  dotfiles  $( [[ -n $(itd_get dotfiles) ]] && echo yes || echo no )
+
+after install: edit config.itd + run 'sudo icontd apply'
+
+send it?" 20 60 || { clear; exit 0; }
+
+# ---------- 5. install ----------
+part() { [[ $DISK =~ (nvme|mmcblk|loop) ]] && echo "${DISK}p$1" || echo "${DISK}$1"; }
+
+do_install() {
+  set -e
+  echo ">> wiping + partitioning $DISK"
+  umount -R "$MNT" 2>/dev/null || true
+  wipefs -af "$DISK"
+  if [[ $UEFI == 1 ]]; then
+    parted -s "$DISK" mklabel gpt mkpart ESP fat32 1MiB 1025MiB set 1 esp on mkpart root ext4 1025MiB 100%
+  else
+    parted -s "$DISK" mklabel msdos mkpart primary ext4 1MiB 1025MiB set 1 boot on mkpart primary ext4 1025MiB 100%
+  fi
+  udevadm settle
+  BOOTP=$(part 1); ROOTP=$(part 2)
+
+  echo ">> formatting"
+  if [[ $UEFI == 1 ]]; then mkfs.fat -F32 "$BOOTP"; else mkfs.ext4 -F "$BOOTP"; fi
+  mkfs.ext4 -F "$ROOTP"
+  mount "$ROOTP" "$MNT"
+  mkdir -p "$MNT/boot"
+  mount "$BOOTP" "$MNT/boot"
+
+  PKGS=(base linux-firmware "$KERNEL" sudo networkmanager grub nano git fastfetch)
+  [[ $UEFI == 1 ]] && PKGS+=(efibootmgr)
+  [[ $USHELL != bash ]] && PKGS+=("$USHELL")
+  [[ -n $DE && $DE != none ]] && PKGS+=(libnotify)
+  mapfile -t AURPKGS < <(itd_list aurpackages)
+  [[ ${#AURPKGS[@]} -gt 0 ]] && PKGS+=(base-devel)
+  DOTFILES=$(itd_get dotfiles)
+  [[ -n $DOTFILES ]] && PKGS+=(rsync)
+  read -ra DEP <<<"$(de_pkgs "$DE")"; PKGS+=("${DEP[@]}")
+  mapfile -t USERPKGS < <(itd_list packages); PKGS+=("${USERPKGS[@]}")
+  mapfile -t FLATPAKS < <(itd_list flatpaks)
+  [[ ${#FLATPAKS[@]} -gt 0 ]] && PKGS+=(flatpak)
+
+  echo ">> pacstrap: ${PKGS[*]}"
+  pacstrap -K "$MNT" "${PKGS[@]}"
+  genfstab -U "$MNT" >> "$MNT/etc/fstab"
+
+  echo ">> icontd files"
+  mkdir -p "$MNT/etc/icontd" "$MNT/usr/share/backgrounds" "$MNT/usr/share/pixmaps"
+  cp "$CONFIG" "$MNT/etc/icontd/config.itd"
+  cp -r /usr/share/backgrounds/icontd "$MNT/usr/share/backgrounds/" 2>/dev/null || true
+  cp /usr/share/pixmaps/icontd.png "$MNT/usr/share/pixmaps/" 2>/dev/null || true
+  rm -f "$MNT/etc/os-release"; cp /etc/os-release "$MNT/etc/os-release"
+  install -Dm644 /usr/share/icontd/fastfetch/icontd.txt "$MNT/usr/share/icontd/fastfetch/icontd.txt"
+  install -Dm644 /etc/xdg/fastfetch/config.jsonc "$MNT/etc/xdg/fastfetch/config.jsonc"
+
+  install -Dm644 /usr/lib/icontd/common.sh "$MNT/usr/lib/icontd/common.sh"
+  install -Dm755 /usr/bin/icontd "$MNT/usr/bin/icontd"
+
+  echo ">> configuring system"
+  arch-chroot "$MNT" /bin/bash -e <<CHROOT
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+hwclock --systohc
+sed -i 's/^#\\($LOCALE \\)/\\1/' /etc/locale.gen
+grep -q "^$LOCALE " /etc/locale.gen || echo "$LOCALE UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=$LOCALE" > /etc/locale.conf
+echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+echo "$HOSTNAME_" > /etc/hostname
+printf '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 $HOSTNAME_\n' > /etc/hosts
+if [[ "$USHELL" == zsh && ! -f /etc/skel/.zshrc ]]; then
+  cat > /etc/skel/.zshrc <<'ZRC'
+# icontd default zshrc (skips the zsh new-user wizard)
+HISTFILE=~/.zsh_history
+HISTSIZE=10000
+SAVEHIST=10000
+setopt autocd histignoredups sharehistory
+autoload -Uz compinit && compinit
+zstyle ':completion:*' menu select
+PROMPT='%F{red}●%f %F{white}%~%f %# '
+ZRC
+fi
+useradd -m -G wheel -s /usr/bin/$USHELL "$USERNAME"
+echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel
+chmod 440 /etc/sudoers.d/10-wheel
+systemctl enable NetworkManager
+CHROOT
+  arch-chroot "$MNT" useradd -m -s "/usr/bin/$USHELL" -c "icontd package user" icontd
+  printf '%s:%s\nroot:%s\nicontd:%s\n' "$USERNAME" "$P1" "$RP" "$IP" | arch-chroot "$MNT" chpasswd
+
+  echo ">> bootloader"
+  if [[ $UEFI == 1 ]]; then
+    arch-chroot "$MNT" grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=icontd
+  else
+    arch-chroot "$MNT" grub-install --target=i386-pc "$DISK"
+  fi
+  sed -i 's/^GRUB_DISTRIBUTOR=.*/GRUB_DISTRIBUTOR="icontd"/' "$MNT/etc/default/grub"
+  arch-chroot "$MNT" grub-mkconfig -o /boot/grub/grub.cfg
+
+  echo ">> icontd-guard (roasts u if u delete config.itd)"
+  install -Dm755 /usr/share/icontd/guard/icontd-guard "$MNT/usr/bin/icontd-guard"
+  install -Dm644 /usr/share/icontd/guard/icontd-guard.path "$MNT/etc/systemd/system/icontd-guard.path"
+  install -Dm644 /usr/share/icontd/guard/icontd-guard.service "$MNT/etc/systemd/system/icontd-guard.service"
+  mkdir -p "$MNT/var/lib/icontd" && cp "$CONFIG" "$MNT/var/lib/icontd/config.itd.bak"
+  arch-chroot "$MNT" systemctl enable icontd-guard.path
+
+  echo ">> services"
+  DM=$(de_dm "$DE"); [[ -n $DM ]] && arch-chroot "$MNT" systemctl enable "$DM" || true
+  for s in $(itd_list services); do
+    arch-chroot "$MNT" systemctl enable "$s" || echo "!! couldn't enable $s (is its package in packages=?)"
+  done
+
+  if [[ ${#FLATPAKS[@]} -gt 0 ]]; then
+    echo ">> flatpaks"
+    arch-chroot "$MNT" flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || true
+    for f in "${FLATPAKS[@]}"; do arch-chroot "$MNT" flatpak install -y --noninteractive flathub "$f" || echo "!! flatpak $f failed"; done
+  fi
+
+  # ---------- AUR ----------
+  if [[ ${#AURPKGS[@]} -gt 0 ]]; then
+    echo ">> AUR: ${AURPKGS[*]}"
+    # temp passwordless sudo so makepkg can install deps, removed right after
+    echo "$USERNAME ALL=(ALL) NOPASSWD: ALL" > "$MNT/etc/sudoers.d/99-icontd-tmp"
+    arch-chroot "$MNT" sudo -u "$USERNAME" bash -c '
+      set -e
+      cd /tmp && rm -rf paru-bin
+      git clone --depth 1 https://aur.archlinux.org/paru-bin.git
+      cd paru-bin && makepkg -si --noconfirm
+    ' || echo "!! couldn't build paru (AUR helper)"
+    for p in "${AURPKGS[@]}"; do
+      arch-chroot "$MNT" sudo -u "$USERNAME" paru -S --noconfirm --needed --skipreview "$p" \
+        || echo "!! AUR package $p failed"
+    done
+    # icontd has no package manager — the helper was just for setup
+    arch-chroot "$MNT" pacman -Rns --noconfirm paru-bin paru-bin-debug 2>/dev/null \
+      || arch-chroot "$MNT" pacman -Rns --noconfirm paru-bin || true
+    rm -f "$MNT/etc/sudoers.d/99-icontd-tmp"
+  fi
+
+  # ---------- GURT ----------
+  mapfile -t GURTPKGS < <(itd_list gurt)
+  GURTGUI=$(itd_get gurt_gui)
+  if [[ ${#GURTPKGS[@]} -gt 0 || $GURTGUI =~ ^(yes|true|1|on)$ ]]; then
+    echo ">> GURT"
+    arch-chroot "$MNT" bash -c "curl -fsSL $GURT_INSTALLER | sh" || echo "!! GURT install failed"
+    [[ $GURTGUI =~ ^(yes|true|1|on)$ ]] && GURTPKGS+=("$GURT_GUI_PKG")
+    for p in "${GURTPKGS[@]}"; do
+      { yes || true; } | arch-chroot "$MNT" gurt "${GURT_INSTALL[@]}" "$p" || echo "!! GURT package $p failed"
+    done
+  fi
+
+  # ---------- dotfiles ----------
+  if [[ -n $DOTFILES ]]; then
+    echo ">> dotfiles: $DOTFILES"
+    arch-chroot "$MNT" sudo -u "$USERNAME" bash -c '
+      set -e
+      cd ~
+      git clone --depth 1 "$1" ~/.dotfiles
+      if [[ -x ~/.dotfiles/install.sh ]]; then
+        cd ~/.dotfiles && ./install.sh
+      else
+        rsync -a --exclude ".git" --exclude "README*" --exclude "LICENSE*" ~/.dotfiles/ ~/
+      fi
+    ' _ "$DOTFILES" || echo "!! dotfiles failed"
+  fi
+
+  # ---------- remember what icontd manages (so removing from config.itd uninstalls it) ----------
+  echo ">> saving managed state"
+  ST="$MNT/var/lib/icontd/managed"; mkdir -p "$ST"
+  INST=$(arch-chroot "$MNT" pacman -Qq | sort -u)
+  comm -12 <(itd_desired_pkgs) <(printf '%s\n' "$INST") > "$ST/packages.list"
+  comm -12 <(itd_list aurpackages | sort -u) <(printf '%s\n' "$INST") > "$ST/aur.list"
+  if [[ ${#FLATPAKS[@]} -gt 0 ]]; then
+    comm -12 <(itd_list flatpaks | sort -u) <(arch-chroot "$MNT" flatpak list --app --columns=application 2>/dev/null | sort -u) > "$ST/flatpaks.list"
+  fi
+  itd_desired_gurt > "$ST/gurt.list"
+  itd_desired_services > "$ST/services.list"
+
+  # ---------- hide pacman + gurt ----------
+  echo ">> hiding pacman + gurt + flatpak installs (only the icontd user gets them)"
+  install -Dm755 /usr/share/icontd/pkgtools/hide-pkgtools "$MNT/usr/lib/icontd/hide-pkgtools"
+  install -Dm644 /usr/share/icontd/pkgtools/icontd-hide-pkgtools.hook "$MNT/etc/pacman.d/hooks/icontd-hide-pkgtools.hook"
+  install -Dm644 /usr/share/icontd/pkgtools/icontd-path.sh "$MNT/etc/profile.d/icontd-path.sh"
+  install -Dm440 /usr/share/icontd/pkgtools/20-icontd "$MNT/etc/sudoers.d/20-icontd"
+  install -Dm755 /usr/share/icontd/pkgtools/flatpak-wrapper "$MNT/usr/lib/icontd/flatpak-wrapper"
+  install -Dm644 /usr/share/icontd/pkgtools/40-icontd-gurt.rules "$MNT/etc/polkit-1/rules.d/40-icontd-gurt.rules"
+  arch-chroot "$MNT" /usr/lib/icontd/hide-pkgtools
+
+  # ---------- block app stores ----------
+  echo ">> blocking Discover / GNOME Software / PackageKit stores"
+  for p in discover gnome-software gnome-software-packagekit-plugin packagekit-qt6 packagekit-qt5; do
+    arch-chroot "$MNT" /usr/lib/icontd/bin/pacman -Q "$p" >/dev/null 2>&1 && \
+      arch-chroot "$MNT" /usr/lib/icontd/bin/pacman -Rdd --noconfirm "$p" || true
+  done
+  # NoExtract lines go right under [options] so they apply forever
+  sed -i "/^\[options\]/r /usr/share/icontd/pkgtools/pacman-noextract.conf" "$MNT/etc/pacman.conf"
+  install -Dm644 /usr/share/icontd/pkgtools/40-icontd-stores.rules "$MNT/etc/polkit-1/rules.d/40-icontd-stores.rules"
+
+  sync
+  echo ">> DONE 🔴"
+}
+
+: > "$LOG"
+( do_install ) 2>&1 | tee -a "$LOG" | "${D[@]}" --programbox "installing... (log: $LOG)" 25 90
+STATUS=${PIPESTATUS[0]}
+[[ $STATUS -eq 0 ]] || die "install failed (exit $STATUS)"
+
+if "${D[@]}" --yesno "icontd is installed 🔴🔥\n\nreboot now?" 9 40; then
+  umount -R "$MNT"; reboot
+fi
+clear

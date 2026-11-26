@@ -1,0 +1,24 @@
+#!/bin/sh
+# moves pacman + gurt out of PATH so normal users get "command not found".
+# only the icontd user (and its sudo) can see them, at /usr/lib/icontd/bin.
+# flatpak gets a wrapper instead (apps still launch, installs don't).
+LIB=/usr/lib/icontd
+BIN=$LIB/bin
+mkdir -p "$BIN"
+for t in pacman gurt; do
+  for dir in /usr/bin /usr/local/bin /bin; do
+    src="$dir/$t"
+    [ -e "$src" ] || [ -L "$src" ] || continue
+    [ "$(readlink -f "$src")" = "$BIN/$t" ] && { rm -f "$src"; continue; }
+    mv -f "$src" "$BIN/$t"
+  done
+done
+chown root:icontd "$BIN" "$BIN"/* 2>/dev/null
+chmod 0750 "$BIN" "$BIN"/* 2>/dev/null
+
+if [ -e /usr/bin/flatpak ] && ! grep -q icontd-flatpak-wrapper /usr/bin/flatpak 2>/dev/null; then
+  mv -f /usr/bin/flatpak "$LIB/flatpak-real"
+  chmod 0755 "$LIB/flatpak-real"
+  install -m755 "$LIB/flatpak-wrapper" /usr/bin/flatpak
+fi
+exit 0

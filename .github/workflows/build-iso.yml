@@ -1,0 +1,56 @@
+name: build icontd ISO
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck -x --severity=warning build.sh \
+            overlay/airootfs/usr/bin/icontd \
+            overlay/airootfs/usr/bin/icontd-install \
+            overlay/airootfs/usr/lib/icontd/common.sh \
+            overlay/airootfs/usr/share/icontd/guard/icontd-guard \
+            overlay/airootfs/usr/share/icontd/pkgtools/hide-pkgtools \
+            overlay/airootfs/usr/share/icontd/pkgtools/flatpak-wrapper
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: install archiso
+        run: pacman -Syu --noconfirm archiso
+      - name: build ISO
+        run: ./build.sh
+      - name: checksum
+        run: cd out && sha256sum *.iso > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: icontd-iso
+          path: |
+            out/*.iso
+            out/SHA256SUMS
+      - name: attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/*.iso
+            out/SHA256SUMS
