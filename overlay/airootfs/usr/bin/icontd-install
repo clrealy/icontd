@@ -233,6 +233,9 @@ chmod 440 /etc/sudoers.d/10-wheel
 systemctl enable NetworkManager
 CHROOT
   arch-chroot "$MNT" useradd -m -s "/usr/bin/$USHELL" -c "icontd package user" icontd
+  # hide the package user from the SDDM login screen (only the real user shows)
+  mkdir -p "$MNT/etc/sddm.conf.d"
+  printf '[Users]\nHideUsers=icontd\n' > "$MNT/etc/sddm.conf.d/icontd.conf"
   printf '%s:%s\nroot:%s\nicontd:%s\n' "$USERNAME" "$P1" "$RP" "$IP" | arch-chroot "$MNT" chpasswd
 
   echo ">> bootloader"
