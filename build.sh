@@ -26,6 +26,13 @@ sed -i \
   -e 's/^iso_application=.*/iso_application="icontd Live\/Install Medium"/' \
   "$PROFILE/profiledef.sh"
 
+echo ">> rebranding boot menus (grub, syslinux, systemd-boot)"
+for d in grub syslinux efiboot; do
+  [[ -d "$PROFILE/$d" ]] || continue
+  find "$PROFILE/$d" -type f \( -name '*.cfg' -o -name '*.conf' \) \
+    -exec sed -i 's/Arch Linux/icontd/g' {} +
+done
+
 echo ">> marking icontd tools executable"
 sed -i 's|^file_permissions=(|file_permissions=(\n  ["/usr/bin/icontd-install"]="0:0:755"\n  ["/usr/bin/icontd"]="0:0:755"|' "$PROFILE/profiledef.sh"
 
