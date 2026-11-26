@@ -1,4 +1,4 @@
-# icontd 🔴
+# icontd 
 
 Declarative Arch. Your whole system lives in one readable file: `/etc/icontd/config.itd`.
 Edit it, run `sudo icontd apply`, and the system matches it.
@@ -9,7 +9,7 @@ timezone=America/New_York
 shell=zsh
 de=plasma
 packages=git, neovim, firefox, fastfetch, openssh
-aurpackages=
+aurpackages=fetch-git
 flatpaks=
 gurt=
 gurt_gui=no
@@ -43,20 +43,12 @@ Boot the ISO and run `icontd-install`. It's a TUI that:
 Removing something from config.itd and applying **uninstalls it**, but only things icontd installed itself
 (tracked in `/var/lib/icontd/managed/`), never the base system.
 
-## No package manager 🤫
+## Packages, declared
 
-- `pacman` and `gurt` live in `/usr/lib/icontd/bin`, out of PATH. Normal users (even w sudo) get `command not found`.
-- Only the `icontd` user has them in PATH + sudo's secure_path. A pacman hook re-hides pacman after upgrades.
-- `/usr/bin/flatpak` is a wrapper: `run/list/info` work for everyone (so apps launch), installs don't.
-- Discover + GNOME Software are removed, `NoExtract` keeps them gone, and a polkit rule denies PackageKit /
-  flatpak-system-helper actions for everyone except `icontd` + root.
-- gurt-app should call `pkexec /usr/lib/icontd/bin/gurt ...` on icontd; a polkit rule makes that ask for the icontd user's password.
-- This is a UX rule, not a security wall: root can still run the hidden tools by full path.
-
+Yes yes, I know we're arch-based, but we killed pacman. Apologies.
 ## icontd-guard 🤡
 
-Every change to config.itd is backed up to `/var/lib/icontd/config.itd.bak`. Delete config.itd and you get
-roasted, a FAKE `sudo rm -rf /`, and your config comes back. Nothing actually gets deleted.
+Every change to config.itd is backed up to `/var/lib/icontd/config.itd.bak`. Delete config.itd and what happens is for YOU to find out!
 
 The system is **not** immutable: root works, everything outside the package rules is normal Arch.
 
@@ -102,7 +94,7 @@ After installing, boot without `-cdrom` and check:
 
 ## Known gaps
 
-- AUR packages whose deps are also AUR-only won't build (no AUR helper on purpose)
+- AUR packages whose deps are also AUR-only won't build
 - GURT removal uses `gurt remove` (guessed) — edit `GURT_*` in `/usr/lib/icontd/common.sh` if the CLI differs
-- Per-user flatpak installs from random GUI apps can still slip past the store block
+- Per-user flatpak installs from random GUI apps can install still (idk why tho)
 - dotfiles are only cloned at install time
